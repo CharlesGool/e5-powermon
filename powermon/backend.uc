@@ -13,6 +13,13 @@
 // use: those samples are not in the averages, they are the charging -- a
 // sample's kind (kind()): battery, charging (current in), full (about none),
 // drain (plugged, and the battery still giving: the charger short of the use).
+//
+// Suspended (deep sleep), no samples are taken: the sample after a wake says
+// how long (its `sleep`, s), and the use across the gap is what the gauge's
+// own charge (`fgu`, 0.1 %: its coulomb counter goes on in suspend) lost --
+// one step is 3 mAh, so a short sleep is not measured by itself: the sleeps
+// are added up (the averages' 深度休眠), and one gets its own figure from
+// SLEEP_OWN s on.  Rows from v1.1 have neither: their gaps stay gaps.
 
 'use strict';
 
@@ -24,6 +31,10 @@ const CSV = '/tmp/powermon/samples.csv';
 const BAT = '/sys/class/power_supply/battery';
 // plugged, a current this close to 0 (mA) is a full battery held, not charging
 const HOLD_MA = 15;
+// a sleep this long (s) is measured by itself; shorter ones get the average of all
+const SLEEP_OWN = 1800;
+// the sleeps' average is given from this much sleep (s) on
+const SLEEP_MIN = 600;
 // the app's file -> where it goes
 const FILES = [
 	[ 'powermon.init', INIT, true ],
@@ -83,7 +94,8 @@ return function(ctx) {
 			if (t <= end - span) break;
 			unshift(out, { t, ma: +f[1], mv: +f[2], mw: +f[3], plugged: f[4] == '1',
 				screen: f[5] == '1', hotspot: f[6] == '1', saver: f[7] == '1',
-				battery: f[8] == '' ? null : +f[8] });
+				battery: f[8] == '' ? null : +f[8],
+				fgu: (f[9] ?? '') == '' ? null : +f[9], sleep: +(f[10] ?? 0) });
 		}
 		return out;
 	}
@@ -106,6 +118,32 @@ return function(ctx) {
 			if (v > 0) return int(v / 1000);
 		}
 		return null;
+	}
+
+	// the sleeps in `day`: the gaps closed by a sample after a wake (`sleep`
+	// > 0) from an unplugged one, with the gauge's charge lost across them
+	// (mAh; null without the gauge), and their average.  Each gets an mw: its
+	// own from SLEEP_OWN s on, else the average's (null under SLEEP_MIN s).
+	// (ucode divides integers as integers: the .0)
+	function sleeps(day) {
+		let cap = capacity_mah(), out = [], sec = 0, mah = 0, mwh = 0, msec = 0;
+		for (let i = 1; i < length(day); i++) {
+			let a = day[i - 1], b = day[i];
+			if (!(b.sleep > 0) || a.plugged) continue;
+			let z = { i, from: a.t, to: b.t, slept: b.sleep, mah: null, mw: null };
+			if (cap && a.fgu != null && b.fgu != null) {
+				let d = b.t - a.t, v = (a.mv + b.mv) / 2000.0;
+				z.mah = (a.fgu - b.fgu) * cap / 1000.0;
+				if (d >= SLEEP_OWN) z.mw = max(0, int(z.mah * v * 3600 / d));
+				msec += d; mah += z.mah; mwh += z.mah * v;
+			}
+			sec += b.t - a.t;
+			push(out, z);
+		}
+		let avg = (msec >= SLEEP_MIN) ? { mw: max(0, int(mwh * 3600 / msec)), ma: max(0, int(mah * 3600 / msec)) } : null;
+		for (let z in out)
+			if (z.mw == null && avg) z.mw = avg.mw;
+		return { list: out, sec, msec, avg };
 	}
 
 	// the newest run of plugged samples (gaps up to 3 min) in `day`: the one
@@ -154,13 +192,16 @@ return function(ctx) {
 		}
 		let groups = {}, recent = [], sum5 = 0, n5 = 0;
 		let plugged_now = now?.plugged ?? false;
+		// (a sample before a sleep: the gap is the sleep's, not its)
+		let sl = sleeps(day), before = {};
+		for (let z in sl.list) before[z.i - 1] = true;
 		for (let i = 0; i < n; i++) {
 			let x = day[i];
-			let w = (i + 1 < n) ? min(day[i + 1].t - x.t, 60) : 10;
+			let w = before[i] ? 0 : (i + 1 < n) ? min(day[i + 1].t - x.t, 60) : 10;
 			if (now && x.t > now.t - 1800) push(recent, [ x.t, x.mw, x.plugged ]);
 			// the 5-minute average of what the newest sample is: the use, or the charging
 			if (now && x.t > now.t - 300 && x.plugged == plugged_now) { sum5 += plugged_now ? -x.mw : x.mw; n5++; }
-			if (x.plugged) continue;
+			if (x.plugged || !w) continue;
 			let k = state_key(x);
 			let g = groups[k];
 			if (!g) g = groups[k] = { screen: x.screen, hotspot: x.hotspot, saver: x.saver, sec: 0, mws: 0 };
@@ -169,7 +210,15 @@ return function(ctx) {
 		let avg = [];
 		for (let k, g in groups)
 			push(avg, { screen: g.screen, hotspot: g.hotspot, saver: g.saver, minutes: int(g.sec / 60), mw: int(g.mws / g.sec) });
-		return { now, avg5: n5 ? int(sum5 / n5) : null, recent, avg, session: session(day, now),
+		// deep sleep: its time in full; mw null while there is too little of it
+		if (sl.sec)
+			push(avg, { sleep: true, screen: false, hotspot: false, saver: true, minutes: int(sl.sec / 60),
+				mw: sl.avg?.mw, ma: sl.avg?.ma });
+		// the sleeps of the last 30 min, cut to it: [ from, to, mw ]
+		let naps = [];
+		for (let z in sl.list)
+			if (now && z.to > now.t - 1800) push(naps, [ max(z.from, now.t - 1800), z.to, z.mw ]);
+		return { now, avg5: n5 ? int(sum5 / n5) : null, recent, naps, avg, session: session(day, now),
 			capacity_mah: capacity_mah(), samples: n, service: running() };
 	}
 

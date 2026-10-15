@@ -4,7 +4,7 @@
 # Every INTERVAL s (e5-plugin-powermon.settings.interval, 10 by default) one
 # line goes to CSV, in RAM (/tmp: nothing is written to flash):
 #
-#   time,current_ma,voltage_mv,power_mw,plugged,screen,hotspot,saver,battery
+#   time,current_ma,voltage_mv,power_mw,plugged,screen,hotspot,saver,battery,fgu,sleep
 #
 #   time        Unix time, s
 #   current_ma  the fuel gauge's current: + into the battery, - out of it
@@ -17,6 +17,17 @@
 #   hotspot     1 with the hotspot's interface (wlan0) up
 #   saver       1 while 热点省电 (hotspotdata) has the radio off or the CPU held
 #   battery     the charge, %
+#   fgu         the fuel gauge's own charge, 0.1 % (sc27xx-fgu/capacity: its
+#               coulomb counter, which goes on counting in suspend)
+#   sleep       s the system was suspended since the previous sample, 0 awake
+#
+# Suspended (热点省电's deep sleep), nothing runs and no samples are taken:
+# the sample after a wake has `sleep` > 0, and the use over the gap is what
+# the gauge's charge (fgu) lost across it -- the backend and the LuCI page
+# work that out.  The sleep is measured here, not taken from the app that
+# suspends: `sleep INTERVAL` counts CLOCK_MONOTONIC, which stops in suspend,
+# while /proc/uptime (CLOCK_BOOTTIME) goes on -- what the uptime moved past
+# the interval is the time suspended.  Rows from v1.1 have neither column.
 #
 # Every read is a shell builtin (no process per sample: a measurement that
 # woke the device would measure itself).  The file is kept to MAX_LINES
@@ -31,6 +42,7 @@ INIT=/etc/init.d/powermon
 OUT=/tmp/powermon
 CSV=$OUT/samples.csv
 BAT=/sys/class/power_supply/battery
+FGU=/sys/class/power_supply/sc27xx-fgu
 MAX_LINES=26000
 LUCI_FILES="/www/luci-static/resources/view/powermon/index.js /usr/share/luci/menu.d/luci-app-powermon.json /usr/share/rpcd/acl.d/luci-app-powermon.json"
 
@@ -81,6 +93,7 @@ lines=0
 INTERVAL=$(interval)
 clock_sync
 cfg_check=0
+prev_up=
 cp "$DIR/service.sh" /var/run/powermon.running 2>/dev/null
 log "sampling every ${INTERVAL}s into $CSV"
 
@@ -89,13 +102,21 @@ while :; do
 	read -r up _ < /proc/uptime
 	up=${up%.*}
 	[ "$up" -lt "$sync_at" ] || clock_sync
+	# (a round is the work, ms, and the interval: the uptime further on than
+	# that was suspended; 2 s of slack for whole seconds and a busy system)
+	sl=0
+	[ -n "$prev_up" ] && sl=$((up - prev_up - prev_interval))
+	[ "$sl" -gt 2 ] || sl=0
+	prev_up=$up
 
 	get ua "$BAT/current_now"
 	get uv "$BAT/voltage_now"
 	get status "$BAT/status"
 	get cap "$BAT/capacity"
+	get fgu "$FGU/capacity"
 	case "$ua" in ''|*[!0-9-]*) ua=0 ;; esac
 	case "$uv" in ''|*[!0-9]*) uv=0 ;; esac
+	case "$fgu" in *[!0-9]*) fgu= ;; esac
 
 	plugged=0
 	get v /sys/class/power_supply/usb/online; [ "$v" = 1 ] && plugged=1
@@ -114,7 +135,7 @@ while :; do
 	mv=$((uv / 1000))
 	# (uA x mV / 10^6 = mW; up to ~10^10, well inside the shell's 64 bits)
 	mw=$(( -ua * mv / 1000000 ))
-	echo "$((boot + up)),$ma,$mv,$mw,$plugged,$screen,$hotspot,$saver,${cap:-}" >> "$CSV"
+	echo "$((boot + up)),$ma,$mv,$mw,$plugged,$screen,$hotspot,$saver,${cap:-},$fgu,$sl" >> "$CSV"
 	lines=$((lines + 1))
 	if [ "$lines" -gt "$MAX_LINES" ]; then
 		tail -n $((MAX_LINES * 3 / 4)) "$CSV" > "$CSV.new" && mv -f "$CSV.new" "$CSV"
@@ -127,5 +148,6 @@ while :; do
 		cfg_check=0
 		INTERVAL=$(interval)
 	fi
+	prev_interval=$INTERVAL
 	sleep "$INTERVAL"
 done

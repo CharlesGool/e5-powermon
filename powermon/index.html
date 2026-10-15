@@ -31,6 +31,8 @@
 // over the last 24 hours (unplugged only), and the charging.  Plugged in, the
 // gauge reads what goes into the battery, not the device's use: the backend
 // says which (now.kind: battery, charging, full, drain) and the session.
+// Deep sleep takes no samples: the backend gives the sleeps (naps) and their
+// average from the gauge's charge, drawn as a purple band at that level.
 // The full chart and the CSV are on LuCI: 状态 -> 功率监测.
 const $ = (id) => document.getElementById(id);
 let st = null, loadError = null;
@@ -40,6 +42,7 @@ function esc(s) {
 }
 
 function stateName(x) {
+	if (x.sleep) return e5.t({ zh: '深度休眠', en: 'deep sleep' });
 	return [x.screen ? e5.t({ zh: '亮屏', en: 'lit' }) : e5.t({ zh: '熄屏', en: 'dark' }),
 		x.hotspot ? e5.t({ zh: '热点开', en: 'hotspot on' }) : e5.t({ zh: '热点关', en: 'hotspot off' }),
 		x.saver ? e5.t({ zh: '省电', en: 'saver' }) : null].filter(Boolean).join(' · ');
@@ -51,16 +54,17 @@ function minutes(m) {
 	return Math.floor(m / 60) + e5.t({ zh: ' 小时 ', en: ' h ' }) + (m % 60) + e5.t({ zh: ' 分', en: ' min' });
 }
 
-// the use, red, on its own scale; plugged-in stretches as a green band
+// the use, red, on its own scale; plugged-in stretches as a green band, the
+// sleeps as a purple one with their level (when known) as a line
 function drawChart() {
-	const c = $('chart'), r = st?.recent ?? [];
+	const c = $('chart'), r = st?.recent ?? [], naps = st?.naps ?? [];
 	const W = c.clientWidth || 300, H = 70, dpr = window.devicePixelRatio || 1;
 	c.width = W * dpr; c.height = H * dpr;
 	const g = c.getContext('2d');
 	g.setTransform(dpr, 0, 0, dpr, 0, 0);
 	g.clearRect(0, 0, W, H);
-	if (r.length < 2) { $('chart-note').textContent = e5.t({ zh: '最近 30 分钟：数据不够', en: 'Last 30 min: not enough data' }); return; }
-	const t0 = r[0][0], t1 = r[r.length - 1][0];
+	if (r.length < 2 && !naps.length) { $('chart-note').textContent = e5.t({ zh: '最近 30 分钟：数据不够', en: 'Last 30 min: not enough data' }); return; }
+	const t0 = Math.min(r[0][0], ...naps.map((z) => z[0])), t1 = r[r.length - 1][0];
 	const used = r.filter((p) => !p[2]).map((p) => p[1]).sort((a, b) => a - b);
 	const top = Math.max(100, (used.length ? used[Math.floor(used.length * 0.98)] : 0) * 1.1);
 	const X = (t) => (t - t0) / Math.max(1, t1 - t0) * (W - 2) + 1;
@@ -74,13 +78,21 @@ function drawChart() {
 		if (run != null) { g.fillRect(Math.round(X(run)), 0, Math.max(1, Math.round(X(r[i - 1][0]) - X(run))), H); run = null; }
 		if (i < r.length && r[i][2]) run = r[i][0];
 	}
+	for (const [a, b, mw] of naps) {
+		g.fillStyle = 'rgba(150,110,230,.22)';
+		g.fillRect(Math.round(X(a)), 0, Math.max(1, Math.round(X(b) - X(a))), H);
+		if (mw == null) continue;
+		g.lineWidth = 1.5; g.strokeStyle = '#a98cf0';
+		g.beginPath(); g.moveTo(X(a), Y(mw)); g.lineTo(X(b), Y(mw)); g.stroke();
+	}
 	g.lineWidth = 1.5; g.strokeStyle = '#f0625a';
 	for (let i = 1; i < r.length; i++) {
 		if (r[i][0] - r[i - 1][0] > 120 || r[i][2] || r[i - 1][2]) continue;
 		g.beginPath(); g.moveTo(X(r[i - 1][0]), Y(r[i - 1][1])); g.lineTo(X(r[i][0]), Y(r[i][1])); g.stroke();
 	}
 	$('chart-note').textContent = used.length
-		? e5.t({ zh: `最近 30 分钟耗电，顶部 ${Math.round(top)} mW（绿色底为插电）`, en: `Last 30 min use, top ${Math.round(top)} mW (green: plugged in)` })
+		? e5.t({ zh: `最近 30 分钟耗电，顶部 ${Math.round(top)} mW（绿色底为插电${naps.length ? '，紫色为深度休眠' : ''}）`,
+			en: `Last 30 min use, top ${Math.round(top)} mW (green: plugged in${naps.length ? ', purple: deep sleep' : ''})` })
 		: e5.t({ zh: '最近 30 分钟一直插着电（绿色底），没有耗电数据', en: 'Plugged in for the last 30 min (green): no use measured' });
 }
 
@@ -139,8 +151,9 @@ function draw() {
 	if (!x) $('now').innerHTML = `<div class="sub">${e5.t({ zh: '还没有数据：后台每 10 秒采样一次，稍等片刻。', en: 'No data yet: one sample every 10 s.' })}</div>`;
 	else drawNow(x);
 	drawCharge();
-	const rows = (st.avg ?? []).slice().sort((a, b) => a.mw - b.mw).map((a) =>
-		`<div class="row"><span>${esc(stateName(a))}</span><span><span class="val">${a.mw} mW</span> <span class="sub">${a.minutes} ${e5.t({ zh: '分钟', en: 'min' })}</span></span></div>`);
+	// (deep sleep without enough of it to measure: its time only)
+	const rows = (st.avg ?? []).slice().sort((a, b) => (a.mw ?? -1) - (b.mw ?? -1)).map((a) =>
+		`<div class="row"><span>${esc(stateName(a))}</span><span><span class="val">${a.mw == null ? e5.t({ zh: '待测', en: 'n/a' }) : a.mw + ' mW'}</span> <span class="sub">${a.minutes} ${e5.t({ zh: '分钟', en: 'min' })}</span></span></div>`);
 	$('avg').innerHTML = `<div class="sub" style="margin-bottom:4px">${e5.t({ zh: '最近 24 小时耗电平均（不含插电）', en: 'Last 24 h use averages (unplugged)' })}</div>` +
 		(rows.length ? rows.join('') : `<div class="sub">${e5.t({ zh: '没有未插电的数据：拔掉 USB 线才能测出耗电。', en: 'No unplugged data: unplug USB to measure.' })}</div>`);
 	$('note').textContent = e5.t({ zh: '完整曲线和导出：电脑浏览器打开 LuCI → 状态 → 功率监测。', en: 'Full chart and CSV: LuCI -> Status -> Power monitor.' }) +

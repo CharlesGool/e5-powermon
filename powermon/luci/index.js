@@ -6,7 +6,8 @@
 
 // 功率监测 (the powermon info screen app): the samples its service writes to
 // /tmp/powermon/samples.csv -- time,current_ma,voltage_mv,power_mw,plugged,
-// screen,hotspot,saver,battery -- as a chart, averages by state, and CSV.
+// screen,hotspot,saver,battery,fgu,sleep -- as a chart, averages by state,
+// and CSV.
 // Read with fs.read_direct (cgi-download: the file can pass ubus's size limit).
 //
 // Plugged in, the gauge reads what goes into the battery (power_mw negative:
@@ -14,11 +15,18 @@
 // a green band on the chart, the charging sessions table -- and not in the
 // use averages.  A plugged sample is charging (current in), full (about
 // none) or drain (the battery still giving: the charger short of the use).
+//
+// Suspended (deep sleep), no samples are taken: the sample after a wake says
+// how long (sleep, s), and the use across the gap is what the gauge's own
+// charge (fgu, 0.1 %, its coulomb counter: on in suspend) lost.  One step is
+// 3 mAh: a sleep gets its own figure from SLEEP_OWN s on, shorter ones the
+// average of all in the range.  v1.1's rows have neither: their gaps stay gaps.
 
 const CSV = '/tmp/powermon/samples.csv';
-const HEADER = 'time,current_ma,voltage_mv,power_mw,plugged,screen,hotspot,saver,battery';
+const HEADER = 'time,current_ma,voltage_mv,power_mw,plugged,screen,hotspot,saver,battery,fgu,sleep';
 const RANGES = [[3600, '1 小时'], [6 * 3600, '6 小时'], [24 * 3600, '24 小时'], [0, '全部']];
 const STRIPS = [
+	['sleep', '休眠', 'rgba(150,110,230,.85)'],
 	['screen', '屏幕亮', 'rgba(230,180,40,.85)'],
 	['hotspot', '热点开', 'rgba(60,140,230,.85)'],
 	['saver', '省电', 'rgba(60,180,110,.85)'],
@@ -26,6 +34,9 @@ const STRIPS = [
 ];
 // plugged, a current this close to 0 (mA) is a full battery held
 const HOLD_MA = 15;
+// a sleep this long (s) is measured by itself; the sleeps' average from SLEEP_MIN s of them
+const SLEEP_OWN = 1800;
+const SLEEP_MIN = 600;
 
 function kind(x) {
 	if (!x.plugged) return 'battery';
@@ -63,9 +74,38 @@ function parse(text) {
 		const f = line.split(',');
 		if (f.length < 9 || !/^\d+$/.test(f[0])) continue;
 		out.push({ t: +f[0], ma: +f[1], mv: +f[2], mw: +f[3], plugged: f[4] == '1',
-			screen: f[5] == '1', hotspot: f[6] == '1', saver: f[7] == '1', battery: f[8] === '' ? null : +f[8] });
+			screen: f[5] == '1', hotspot: f[6] == '1', saver: f[7] == '1', battery: f[8] === '' ? null : +f[8],
+			fgu: f[9] == null || f[9] === '' ? null : +f[9], sleep: +(f[10] || 0) });
 	}
 	return out;
+}
+
+// the sleeps in s: the gaps closed by a sample after a wake from an unplugged
+// one, with the gauge's charge lost across them (mAh; null without the gauge);
+// each with an mw: its own from SLEEP_OWN s on, else the average's (null with
+// under SLEEP_MIN s of them).  `before`: the indexes of the samples before one.
+// One begun before `from` counts from there, with its share of the charge.
+function sleeps(s, mah, from) {
+	const list = [], before = {};
+	let sec = 0, msec = 0, sum = 0, mwh = 0;
+	for (let i = 1; i < s.length; i++) {
+		const a = s[i - 1], b = s[i];
+		if (!(b.sleep > 0) || a.plugged) continue;
+		const d = b.t - a.t, z = { a, b, d, mah: null, mw: null, own: false };
+		const part = from > a.t ? (b.t - from) / d : 1;
+		if (mah && a.fgu != null && b.fgu != null) {
+			const v = (a.mv + b.mv) / 2000;
+			z.mah = (a.fgu - b.fgu) * mah / 1000;
+			if (d >= SLEEP_OWN) { z.mw = Math.max(0, Math.round(z.mah * v * 3600 / d)); z.own = true; }
+			msec += d * part; sum += z.mah * part; mwh += z.mah * v * part;
+		}
+		sec += d * part;
+		before[i - 1] = true;
+		list.push(z);
+	}
+	const avg = msec >= SLEEP_MIN ? { mw: Math.max(0, mwh * 3600 / msec), ma: Math.max(0, sum * 3600 / msec) } : null;
+	list.forEach((z) => { if (z.mw == null && avg) z.mw = Math.round(avg.mw); });
+	return { list, before, sec, msec, mwh, mah: sum, avg };
 }
 
 // a sample's weight in seconds: the gap to the next one, at most 3 typical gaps
@@ -77,6 +117,7 @@ function weights(s) {
 }
 
 function stateName(x) {
+	if (x.sleep === true) return '深度休眠';
 	return [x.screen ? '亮屏' : '熄屏', x.hotspot ? '热点开' : '热点关', x.saver ? '省电生效' : '省电未生效'].join(' · ');
 }
 
@@ -121,7 +162,16 @@ return view.extend({
 	shown: function() {
 		if (!this.samples.length) return [];
 		const end = this.samples[this.samples.length - 1].t;
-		return this.range ? this.samples.filter((x) => x.t > end - this.range) : this.samples;
+		if (!this.range) return this.samples;
+		// (with the sample before a sleep the range begins in: that sleep is the range's too)
+		let i = this.samples.findIndex((x) => x.t > end - this.range);
+		if (i > 0 && this.samples[i].sleep > 0) i--;
+		return this.samples.slice(i);
+	},
+
+	// where the range begins (its first sample can be the one before a sleep)
+	from: function(s) {
+		return this.range && s.length ? Math.max(s[0].t, s[s.length - 1].t - this.range) : -Infinity;
 	},
 
 	drawChart: function() {
@@ -144,7 +194,7 @@ return view.extend({
 		const L0 = 60, R0 = 12, T0 = 10, stripH = 11, stripGap = 5;
 		const stripsTop = H - 22 - STRIPS.length * (stripH + stripGap);
 		const B0 = stripsTop - 26;
-		const t0 = s[0].t, t1 = s[s.length - 1].t;
+		const t0 = this.range ? this.from(s) : s[0].t, t1 = s[s.length - 1].t;
 		const used = s.filter((x) => !x.plugged).map((x) => x.mw).sort((a, b) => a - b);
 		const all = s.map((x) => x.mw).sort((a, b) => a - b);
 		const ref = used.length ? used : all;
@@ -153,7 +203,7 @@ return view.extend({
 		top = Math.ceil(top / step) * step;
 		// (plugged samples -- charging, negative -- are drawn clipped: they set no scale)
 		const bottom = Math.min(0, Math.floor((used.length ? used[0] : 0) / step) * step);
-		const X = (t) => L0 + (t - t0) / Math.max(1, t1 - t0) * (W - L0 - R0);
+		const X = (t) => L0 + (Math.max(t0, t) - t0) / Math.max(1, t1 - t0) * (W - L0 - R0);
 		const Y = (v) => T0 + (top - Math.max(bottom, Math.min(top, v))) / (top - bottom) * (B0 - T0);
 		this.layout = { X, t0, t1, L0, R0, W, s };
 
@@ -176,15 +226,34 @@ return view.extend({
 		const { w, typical } = weights(s);
 		g.fillStyle = 'rgba(60,190,120,.14)';
 		s.forEach((x, i) => { if (x.plugged) g.fillRect(X(x.t), T0, Math.max(1, X(x.t + w[i]) - X(x.t)), B0 - T0); });
+		// asleep: a purple band; the state before a sleep holds through it
+		const sl = sleeps(s, this.designMah, t0);
+		this.layout.sleeps = sl.list;
+		g.fillStyle = 'rgba(150,110,230,.13)';
+		sl.list.forEach((z) => g.fillRect(X(z.a.t), T0, Math.max(1, X(z.b.t) - X(z.a.t)), B0 - T0));
+		const wd = s.map((x, i) => sl.before[i] ? s[i + 1].t - x.t : w[i]);
 
 		// the state strips under the chart
 		STRIPS.forEach(([key, label, color], k) => {
 			const y = stripsTop + k * (stripH + stripGap);
 			g.fillStyle = 'rgba(128,128,128,.12)'; g.fillRect(L0, y, W - L0 - R0, stripH);
 			g.fillStyle = color;
-			s.forEach((x, i) => { if (x[key]) g.fillRect(X(x.t), y, Math.max(1, X(x.t + w[i]) - X(x.t)), stripH); });
+			if (key == 'sleep')
+				sl.list.forEach((z) => g.fillRect(X(z.a.t), y, Math.max(1, X(z.b.t) - X(z.a.t)), stripH));
+			else
+				s.forEach((x, i) => { if (x[key]) g.fillRect(X(x.t), y, Math.max(1, X(x.t + wd[i]) - X(x.t)), stripH); });
 			g.fillStyle = ink; g.fillText(label, 4, y + stripH - 1);
 		});
+
+		// a sleep's use, when known: level across it, dashed where it is the sleeps' average
+		g.lineWidth = 1.5;
+		g.strokeStyle = 'rgb(130,90,220)';
+		sl.list.forEach((z) => {
+			if (z.mw == null) return;
+			g.setLineDash(z.own ? [] : [4, 3]);
+			g.beginPath(); g.moveTo(X(z.a.t), Y(z.mw)); g.lineTo(X(z.b.t), Y(z.mw)); g.stroke();
+		});
+		g.setLineDash([]);
 
 		// the use: broken at gaps, not drawn while plugged in
 		g.lineWidth = 1.5;
@@ -203,6 +272,13 @@ return view.extend({
 		if (!l) return;
 		const r = this.canvas.getBoundingClientRect();
 		const t = l.t0 + (ev.clientX - r.left - l.L0) / (l.W - l.L0 - l.R0) * (l.t1 - l.t0);
+		const z = (l.sleeps || []).find((z) => t > z.a.t && t < z.b.t);
+		if (z) {
+			this.hover.textContent = '深度休眠 ' + fmtTime(z.a.t, true) + ' – ' + fmtTime(z.b.t, false) + '（' + fmtDur(z.d) + '）  ' +
+				(z.mw == null ? '耗电待测（休眠时间还不够长）' : (z.own ? '约 ' : '按所选范围休眠平均约 ') + z.mw + ' mW') +
+				(z.mah != null ? '  电量计 ' + (z.a.fgu / 10) + '% → ' + (z.b.fgu / 10) + '%（' + z.mah.toFixed(1) + ' mAh）' : '');
+			return;
+		}
 		let best = null;
 		for (const x of l.s) if (!best || Math.abs(x.t - t) < Math.abs(best.t - t)) best = x;
 		if (!best) return;
@@ -214,9 +290,11 @@ return view.extend({
 	renderStats: function() {
 		const s = this.shown();
 		const { w } = weights(s);
+		const sl = sleeps(s, this.designMah, this.from(s));
 		const groups = {}, total = { sec: 0, mws: 0, mas: 0 };
 		s.forEach((x, i) => {
-			if (x.plugged) return;
+			// (a sample before a sleep: the gap is the sleep's)
+			if (x.plugged || sl.before[i]) return;
 			const k = stateName(x);
 			const gr = groups[k] = groups[k] || { sec: 0, mws: 0, mas: 0, min: Infinity, max: -Infinity };
 			gr.sec += w[i]; gr.mws += x.mw * w[i]; gr.mas += -x.ma * w[i];
@@ -234,6 +312,19 @@ return view.extend({
 				E('td', { 'class': 'td' }, life(ma))
 			]);
 		});
+		// deep sleep first: its time in full, its use from the gauge (the total gets
+		// what was measured of it, the time with a gauge on both ends)
+		if (sl.sec > 0) {
+			const own = sl.list.filter((z) => z.own).map((z) => z.mw);
+			rows.unshift(E('tr', { 'class': 'tr' }, [
+				E('td', { 'class': 'td' }, '深度休眠（' + sl.list.length + ' 次）'), E('td', { 'class': 'td' }, fmtDur(sl.sec)),
+				E('td', { 'class': 'td' }, sl.avg ? E('strong', {}, Math.round(sl.avg.mw) + ' mW') : '待测'),
+				E('td', { 'class': 'td' }, sl.avg ? Math.round(sl.avg.ma) + ' mA' : '—'),
+				E('td', { 'class': 'td' }, own.length > 1 ? Math.min(...own) + ' – ' + Math.max(...own) + ' mW' : '—'),
+				E('td', { 'class': 'td' }, sl.avg ? life(sl.avg.ma) : '—')
+			]));
+			total.sec += sl.msec; total.mws += sl.mwh * 3600; total.mas += sl.mah * 3600;
+		}
 		if (total.sec > 0)
 			rows.push(E('tr', { 'class': 'tr' }, [
 				E('td', { 'class': 'td' }, E('em', {}, '全部（不含插电）')), E('td', { 'class': 'td' }, fmtDur(total.sec)),
@@ -324,7 +415,7 @@ return view.extend({
 		const exportRange = E('button', { 'class': 'cbi-button cbi-button-save', click: () => {
 			const s = this.shown();
 			download('powermon-' + stamp() + '.csv',
-				HEADER + '\n' + s.map((x) => [x.t, x.ma, x.mv, x.mw, +x.plugged, +x.screen, +x.hotspot, +x.saver, x.battery ?? ''].join(',')).join('\n') + '\n');
+				HEADER + '\n' + s.map((x) => [x.t, x.ma, x.mv, x.mw, +x.plugged, +x.screen, +x.hotspot, +x.saver, x.battery ?? '', x.fgu ?? '', x.sleep].join(',')).join('\n') + '\n');
 		} }, '导出当前范围 CSV');
 		const exportAll = E('button', { 'class': 'cbi-button', click: () => {
 			L.resolveDefault(fs.read_direct(CSV, 'text'), '').then((text) => download('powermon-all-' + stamp() + '.csv', HEADER + '\n' + text));
@@ -344,15 +435,20 @@ return view.extend({
 			E('div', { 'class': 'cbi-map-descr' },
 				'电池电量计读出的整机耗电（电流 × 电压），后台每 10 秒记录一次，存在内存里，最多约 3 天，重启后清空。' +
 				'插着 USB / 电源时，电量计读到的是充进电池的功率，不是整机耗电：这些时段在图上是绿色底，单独列在“充电记录”里，' +
-				'不计入耗电平均值——要测耗电请拔掉线。'),
+				'不计入耗电平均值——要测耗电请拔掉线。' +
+				'深度休眠（热点省电的“深度休眠”）时系统挂起、不能采样：休眠段在图上是紫色底，' +
+				'耗电按电量计在休眠前后的变化估算（紫线；虚线表示休眠太短，用所选范围内全部休眠的平均值）。'),
 			this.now,
 			E('div', { style: 'margin-bottom:.5em' }, buttons),
 			E('div', { 'class': 'cbi-section' }, [this.canvas, this.hover]),
 			E('h3', {}, '各状态平均功率（所选范围，不含插电）'),
 			this.stats,
-			E('div', { 'class': 'cbi-value-description' }, this.designMah ?
+			E('div', { 'class': 'cbi-value-description' }, (this.designMah ?
 				'“满电可用”按电池设计容量 ' + this.designMah + ' mAh ÷ 平均电流估算，未计电池老化和低电量截止。' :
-				'读不到电池容量，不估算续航。'),
+				'读不到电池容量，不估算续航。') +
+				'深度休眠的时长是挂起的实际时长，耗电 = 电量计在休眠前后的差（0.1% 一档，约 ' +
+				(this.designMah ? Math.round(this.designMah / 1000) : 3) + ' mAh）× 电压：' +
+				'休眠累计不到 10 分钟时显示“待测”，越长越准；“范围”只列出 30 分钟以上的单次休眠。'),
 			E('h3', {}, '充电记录（所选范围）'),
 			this.charge,
 			E('div', { 'class': 'cbi-value-description' },
