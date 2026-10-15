@@ -6,6 +6,16 @@
 
 容悦 E5（OpenWrt）信息屏应用。当前版本 **v1.1**，应用 ID `powermon`。
 
+## 截图
+
+![功率曲线](screenshots/power-chart.jpg)
+
+LuCI：状态 → 功率监测。整机功率曲线，下方色条标出屏幕亮、热点开、省电、插电的时段，绿色底为插电时段。
+
+![各状态平均功率](screenshots/power-by-state.jpg)
+
+按状态统计平均功率、电流和满电可用时长（不含插电时段）。
+
 ## 安装
 
 1. 下载 [`releases/powermon-v1.1.tar.gz`](releases/powermon-v1.1.tar.gz)。
