@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<style>
+	html, body { margin: 0; background: #0b0e13; color: #e8ecf2;
+		font-family: "Noto Sans CJK SC", "DejaVu Sans", sans-serif; user-select: none; cursor: none; }
+	body { padding: 8px; }
+	.card { background: #161b23; border-radius: 10px; padding: 9px 11px; margin-bottom: 7px; }
+	.row { display: flex; justify-content: space-between; align-items: baseline; }
+	.row + .row { margin-top: 5px; }
+	.big { font-size: 26px; font-weight: bold; font-variant-numeric: tabular-nums; }
+	.sub { color: #8b95a5; font-size: 12px; line-height: 1.5; }
+	.val { font-weight: bold; font-variant-numeric: tabular-nums; }
+	.warn { color: #f2c14b; }
+	canvas { display: block; width: 100%; height: 70px; }
+</style>
+</head>
+<body>
+<div class="card" id="now"></div>
+<div class="card"><canvas id="chart"></canvas><div class="sub" id="chart-note"></div></div>
+<div class="card" id="avg"></div>
+<div class="sub" id="note"></div>
+<script src="/sdk/e5.js"></script>
+<script>
+'use strict';
+// 功率监测: the newest sample, the last 30 minutes, and the averages by state
+// over the last 24 hours (unplugged only).  The full chart and the CSV are on
+// LuCI: 状态 -> 功率监测.
+const $ = (id) => document.getElementById(id);
+let st = null, loadError = null;
+
+function esc(s) {
+	return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function stateName(x) {
+	return [x.screen ? e5.t({ zh: '亮屏', en: 'lit' }) : e5.t({ zh: '熄屏', en: 'dark' }),
+		x.hotspot ? e5.t({ zh: '热点开', en: 'hotspot on' }) : e5.t({ zh: '热点关', en: 'hotspot off' }),
+		x.saver ? e5.t({ zh: '省电', en: 'saver' }) : null].filter(Boolean).join(' · ');
+}
+
+function drawChart() {
+	const c = $('chart'), r = st?.recent ?? [];
+	const W = c.clientWidth || 300, H = 70, dpr = window.devicePixelRatio || 1;
+	c.width = W * dpr; c.height = H * dpr;
+	const g = c.getContext('2d');
+	g.setTransform(dpr, 0, 0, dpr, 0, 0);
+	g.clearRect(0, 0, W, H);
+	if (r.length < 2) { $('chart-note').textContent = e5.t({ zh: '最近 30 分钟：数据不够', en: 'Last 30 min: not enough data' }); return; }
+	const t0 = r[0][0], t1 = r[r.length - 1][0];
+	const vals = r.map((p) => p[1]).sort((a, b) => a - b);
+	const top = Math.max(100, vals[Math.floor(vals.length * 0.98)] * 1.1);
+	const X = (t) => (t - t0) / Math.max(1, t1 - t0) * (W - 2) + 1;
+	const Y = (v) => H - 2 - Math.max(0, Math.min(top, v)) / top * (H - 4);
+	g.lineWidth = 1.5;
+	for (let i = 1; i < r.length; i++) {
+		if (r[i][0] - r[i - 1][0] > 120) continue;
+		g.strokeStyle = (r[i][2] || r[i - 1][2]) ? '#6b7280' : '#f0625a';
+		g.beginPath(); g.moveTo(X(r[i - 1][0]), Y(r[i - 1][1])); g.lineTo(X(r[i][0]), Y(r[i][1])); g.stroke();
+	}
+	$('chart-note').textContent = e5.t({ zh: `最近 30 分钟，顶部 ${Math.round(top)} mW（灰色为插电）`,
+		en: `Last 30 min, top ${Math.round(top)} mW (grey: plugged in)` });
+}
+
+function draw() {
+	if (!st) {
+		$('now').innerHTML = loadError
+			? `<div class="sub warn">${e5.t({ zh: '读取失败：', en: 'Cannot load: ' })}${esc(loadError)}</div>`
+			: `<div class="sub">${e5.t({ zh: '读取中…', en: 'Loading…' })}</div>`;
+		return;
+	}
+	const x = st.now;
+	if (!x) {
+		$('now').innerHTML = `<div class="sub">${e5.t({ zh: '还没有数据：后台每 10 秒采样一次，稍等片刻。', en: 'No data yet: one sample every 10 s.' })}</div>`;
+	} else {
+		$('now').innerHTML =
+			`<div class="row"><span class="big">${x.mw} mW</span><span class="sub">${x.ma} mA · ${(x.mv / 1000).toFixed(2)} V</span></div>` +
+			`<div class="row sub"><span>${esc(stateName(x))}${x.plugged ? ' · <span class="warn">' + e5.t({ zh: '插电中，读数不是耗电', en: 'plugged in: not the use' }) + '</span>' : ''}</span>` +
+			`<span>${st.avg5 != null ? e5.t({ zh: '5 分钟平均 ', en: '5-min avg ' }) + st.avg5 + ' mW' : ''}</span></div>`;
+	}
+	const rows = (st.avg ?? []).slice().sort((a, b) => a.mw - b.mw).map((a) =>
+		`<div class="row"><span>${esc(stateName(a))}</span><span><span class="val">${a.mw} mW</span> <span class="sub">${a.minutes} ${e5.t({ zh: '分钟', en: 'min' })}</span></span></div>`);
+	$('avg').innerHTML = `<div class="sub" style="margin-bottom:4px">${e5.t({ zh: '最近 24 小时平均（不含插电）', en: 'Last 24 h averages (unplugged)' })}</div>` +
+		(rows.length ? rows.join('') : `<div class="sub">${e5.t({ zh: '没有未插电的数据：拔掉 USB 线才能测出耗电。', en: 'No unplugged data: unplug USB to measure.' })}</div>`);
+	$('note').textContent = e5.t({ zh: '完整曲线和导出：电脑浏览器打开 LuCI → 状态 → 功率监测。', en: 'Full chart and CSV: LuCI -> Status -> Power monitor.' }) +
+		(st.service ? '' : e5.t({ zh: '（后台采样未运行）', en: ' (the sampler is not running)' }));
+	drawChart();
+}
+
+async function load() {
+	try { st = await e5.api('/status'); loadError = null; }
+	catch (e) { loadError = e.message || String(e); }
+	draw();
+}
+
+draw();
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>
