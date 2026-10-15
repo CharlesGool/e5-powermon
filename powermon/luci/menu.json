@@ -1,0 +1,8 @@
+{
+  "admin/status/powermon": {
+    "title": "功率监测",
+    "order": 90,
+    "action": { "type": "view", "path": "powermon/index" },
+    "depends": { "acl": ["luci-app-powermon"] }
+  }
+}

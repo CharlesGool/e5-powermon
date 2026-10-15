@@ -1,0 +1,16 @@
+#!/bin/sh /etc/rc.common
+# 功率监测 (Power Monitor): the powermon info screen app's sampler
+# (/etc/e5-infoscreen/plugins/powermon/service.sh).  Installed by the app's
+# backend; it removes itself when the app is removed.
+START=98
+USE_PROCD=1
+
+SCRIPT=/etc/e5-infoscreen/plugins/powermon/service.sh
+
+start_service() {
+	[ -f "$SCRIPT" ] || return 0
+	procd_open_instance
+	procd_set_param command /bin/sh "$SCRIPT"
+	procd_set_param respawn 3600 5 0
+	procd_close_instance
+}

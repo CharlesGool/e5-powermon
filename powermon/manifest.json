@@ -1,0 +1,22 @@
+{
+	"id": "powermon",
+	"api_version": 2,
+	"version": "1.1",
+	"name": { "zh": "功率监测", "en": "Power Monitor" },
+	"description": { "zh": "整机耗电曲线和充电记录，按状态统计，可导出", "en": "Power draw and charging over time, by state, exportable" },
+	"entry": "index.html",
+	"order": 46,
+	"notifications": true,
+	"settings": [
+		{
+			"id": "interval", "type": "choice", "uci": "e5-plugin-powermon.settings.interval", "default": "10",
+			"label": { "zh": "采样间隔", "en": "Sample interval" },
+			"options": [
+				{ "value": "5", "label": { "zh": "5 秒", "en": "5 s" } },
+				{ "value": "10", "label": { "zh": "10 秒", "en": "10 s" } },
+				{ "value": "30", "label": { "zh": "30 秒", "en": "30 s" } },
+				{ "value": "60", "label": { "zh": "1 分钟", "en": "1 min" } }
+			]
+		}
+	]
+}

@@ -1,0 +1,18 @@
+{
+  "luci-app-powermon": {
+    "description": "Power monitor: the samples of the powermon info screen app",
+    "read": {
+      "cgi-io": [ "download" ],
+      "file": {
+        "/tmp/powermon/samples.csv": [ "read" ],
+        "/sys/class/power_supply/battery/charge_full_design": [ "read" ],
+        "/sys/class/power_supply/battery/charge_full": [ "read" ]
+      }
+    },
+    "write": {
+      "file": {
+        "/tmp/powermon/samples.csv": [ "write" ]
+      }
+    }
+  }
+}
