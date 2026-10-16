@@ -21,6 +21,7 @@
 <body>
 <div class="card" id="now"></div>
 <div class="card"><canvas id="chart"></canvas><div class="sub" id="chart-note"></div></div>
+<div class="card"><canvas id="level"></canvas><div class="sub" id="level-note"></div></div>
 <div class="card" id="charge" hidden></div>
 <div class="card" id="avg"></div>
 <div class="sub" id="note"></div>
@@ -33,6 +34,7 @@
 // says which (now.kind: battery, charging, full, drain) and the session.
 // Deep sleep takes no samples: the backend gives the sleeps (naps) and their
 // average from the gauge's charge, drawn as a purple band at that level.
+// Under the use, the charge over the last 24 hours (backend: level).
 // The full chart and the CSV are on LuCI: 状态 -> 功率监测.
 const $ = (id) => document.getElementById(id);
 let st = null, loadError = null;
@@ -94,6 +96,36 @@ function drawChart() {
 		? e5.t({ zh: `最近 30 分钟耗电，顶部 ${Math.round(top)} mW（绿色底为插电${naps.length ? '，紫色为深度休眠' : ''}）`,
 			en: `Last 30 min use, top ${Math.round(top)} mW (green: plugged in${naps.length ? ', purple: deep sleep' : ''})` })
 		: e5.t({ zh: '最近 30 分钟一直插着电（绿色底），没有耗电数据', en: 'Plugged in for the last 30 min (green): no use measured' });
+}
+
+// the charge (%), on a scale of at least 10 points; plugged in as a green band
+function drawLevel() {
+	const c = $('level'), r = st?.level ?? [];
+	const W = c.clientWidth || 300, H = 70, dpr = window.devicePixelRatio || 1;
+	c.width = W * dpr; c.height = H * dpr;
+	const g = c.getContext('2d');
+	g.setTransform(dpr, 0, 0, dpr, 0, 0);
+	g.clearRect(0, 0, W, H);
+	if (r.length < 2) { $('level-note').textContent = e5.t({ zh: '电量：数据不够', en: 'Charge: not enough data' }); return; }
+	const t0 = r[0][0], t1 = r[r.length - 1][0];
+	const v = r.map((p) => p[1]);
+	let lo = Math.min(...v), hi = Math.max(...v);
+	const pad = Math.max(0, 10 - (hi - lo)) / 2;
+	lo = Math.max(0, Math.floor(lo - pad)); hi = Math.min(100, Math.ceil(hi + pad));
+	if (hi - lo < 10) { if (lo == 0) hi = 10; else lo = 90; }
+	const X = (t) => (t - t0) / Math.max(1, t1 - t0) * (W - 2) + 1;
+	const Y = (p) => H - 2 - (p - lo) / (hi - lo) * (H - 4);
+	g.fillStyle = 'rgba(79,209,139,.18)';
+	for (let i = 0; i + 1 < r.length; i++)
+		if (r[i][2]) g.fillRect(X(r[i][0]), 0, Math.max(1, X(r[i + 1][0]) - X(r[i][0])), H);
+	g.lineWidth = 1.5; g.strokeStyle = '#5aa9f0';
+	g.beginPath();
+	r.forEach((p, i) => { if (i) g.lineTo(X(p[0]), Y(p[1])); else g.moveTo(X(p[0]), Y(p[1])); });
+	g.stroke();
+	const span = minutes(Math.round((t1 - t0) / 60));
+	$('level-note').textContent = e5.t({
+		zh: `最近 ${span}电量 ${v[0]}% → ${v[v.length - 1]}%，纵轴 ${lo}–${hi}%（绿色底为插电）`,
+		en: `Charge over ${span}: ${v[0]}% → ${v[v.length - 1]}%, scale ${lo}–${hi}% (green: plugged in)` });
 }
 
 function drawNow(x) {
@@ -159,6 +191,7 @@ function draw() {
 	$('note').textContent = e5.t({ zh: '完整曲线和导出：电脑浏览器打开 LuCI → 状态 → 功率监测。', en: 'Full chart and CSV: LuCI -> Status -> Power monitor.' }) +
 		(st.service ? '' : e5.t({ zh: '（后台采样未运行）', en: ' (the sampler is not running)' }));
 	drawChart();
+	drawLevel();
 }
 
 async function load() {

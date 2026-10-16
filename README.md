@@ -54,6 +54,6 @@ CSV 增加两列 `fgu`（电量计电量，0.1%）和 `sleep`（距上个样本�
 
 ## 版本
 
-- [v1.2](releases/powermon-v1.2.tar.gz)（当前）：统计深度休眠期间的耗电
+- [v1.2](releases/powermon-v1.2.tar.gz)（当前）：统计深度休眠期间的耗电；信息屏页面增加最近 24 小时电量图；修正「预计充满」恒为 0 分钟
 - [v1.1](releases/powermon-v1.1.tar.gz)
 - [v1.0](releases/powermon-v1.0.tar.gz)

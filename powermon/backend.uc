@@ -5,8 +5,8 @@
 // -- an image update brings neither; the notification poll puts them back --
 // and serves the app's page on the screen.
 //
-//   GET  /status          the newest sample, the last 30 min, averages by state,
-//                         the charging session
+//   GET  /status          the newest sample, the last 30 min, the charge over
+//                         24 h, averages by state, the charging session
 //   GET  /notifications   (none: only the install check, once a minute)
 //
 // Plugged in, the gauge reads what goes into the battery, not the device's
@@ -35,6 +35,8 @@ const HOLD_MA = 15;
 const SLEEP_OWN = 1800;
 // the sleeps' average is given from this much sleep (s) on
 const SLEEP_MIN = 600;
+// the charge chart's points (about the screen's width)
+const LEVEL_POINTS = 150;
 // the app's file -> where it goes
 const FILES = [
 	[ 'powermon.init', INIT, true ],
@@ -146,6 +148,28 @@ return function(ctx) {
 		return { list: out, sec, msec, avg };
 	}
 
+	// the charge over `day` in at most LEVEL_POINTS steps: [ t, %, plugged ]
+	// -- a step's last sample, plugged if any of its samples was.  (The %
+	// the status bar has, not the gauge's 0.1 %: v1.1's rows have only that,
+	// and the two differ by a % or two.)
+	function level(day) {
+		let n = length(day), out = [];
+		if (!n) return out;
+		let t0 = day[0].t, step = max(1, (day[n - 1].t - t0) / LEVEL_POINTS), cur = null, k = -1;
+		for (let x in day) {
+			let pct = x.battery;
+			if (pct == null) continue;
+			let b = int((x.t - t0) / step);
+			if (b != k) {
+				k = b;
+				push(out, cur = [ x.t, pct, x.plugged ]);
+				continue;
+			}
+			cur[0] = x.t; cur[1] = pct; cur[2] = cur[2] || x.plugged;
+		}
+		return out;
+	}
+
 	// the newest run of plugged samples (gaps up to 3 min) in `day`: the one
 	// going on, else the last one
 	function session(day, now) {
@@ -170,14 +194,14 @@ return function(ctx) {
 			pct_per_hour: null, full_minutes: null
 		};
 		if (a.battery != null && b.battery != null && b.t - a.t >= 600)
-			r.pct_per_hour = int((b.battery - a.battery) * 3600 / (b.t - a.t) * 10) / 10;
+			r.pct_per_hour = int((b.battery - a.battery) * 36000.0 / (b.t - a.t)) / 10.0;
 		// to full, while charging: what is missing over the last 5 minutes' current
 		if (r.active && kind(now) == 'charging' && now.battery != null && now.battery < 100) {
 			let cap = capacity_mah(), s5 = 0, n5 = 0;
 			for (let k = end; k >= start && day[k].t > now.t - 300; k--)
 				if (kind(day[k]) == 'charging') { s5 += day[k].ma; n5++; }
 			if (cap && n5 && s5 / n5 > 0)
-				r.full_minutes = int((100 - now.battery) / 100 * cap / (s5 / n5) * 60);
+				r.full_minutes = int((100 - now.battery) / 100.0 * cap / (s5 / n5) * 60);
 		}
 		return r;
 	}
@@ -218,7 +242,7 @@ return function(ctx) {
 		let naps = [];
 		for (let z in sl.list)
 			if (now && z.to > now.t - 1800) push(naps, [ max(z.from, now.t - 1800), z.to, z.mw ]);
-		return { now, avg5: n5 ? int(sum5 / n5) : null, recent, naps, avg, session: session(day, now),
+		return { now, avg5: n5 ? int(sum5 / n5) : null, recent, naps, level: level(day), avg, session: session(day, now),
 			capacity_mah: capacity_mah(), samples: n, service: running() };
 	}
 
