@@ -15,26 +15,32 @@
 	.val { font-weight: bold; font-variant-numeric: tabular-nums; }
 	.warn { color: #f2c14b; }
 	.good { color: #4fd18b; }
-	canvas { display: block; width: 100%; height: 70px; }
+	canvas { display: block; width: 100%; height: 100px; margin-top: 4px; }
+	#spans button { background: #222935; color: #8b95a5; border: 0; border-radius: 6px; font: inherit; font-size: 12px;
+		padding: 3px 8px; margin-left: 4px; }
+	#spans button.on { background: #2f6fb3; color: #fff; }
 </style>
 </head>
 <body>
 <div class="card" id="now"></div>
-<div class="card"><canvas id="chart"></canvas><div class="sub" id="chart-note"></div></div>
-<div class="card"><canvas id="level"></canvas><div class="sub" id="level-note"></div></div>
+<div class="card">
+	<div class="row"><span class="sub" id="chart-title"></span><span id="spans"></span></div>
+	<canvas id="chart"></canvas><div class="sub" id="chart-note"></div>
+	<canvas id="level"></canvas><div class="sub" id="level-note"></div>
+</div>
 <div class="card" id="charge" hidden></div>
 <div class="card" id="avg"></div>
 <div class="sub" id="note"></div>
 <script src="/sdk/e5.js"></script>
 <script>
 'use strict';
-// 功率监测: the newest sample, the last 30 minutes, the averages by state
+// 功率监测: the newest sample, the use and the charge over the last 30 min,
+// 6 h or 24 h (one range for both, on the same times), the averages by state
 // over the last 24 hours (unplugged only), and the charging.  Plugged in, the
 // gauge reads what goes into the battery, not the device's use: the backend
 // says which (now.kind: battery, charging, full, drain) and the session.
 // Deep sleep takes no samples: the backend gives the sleeps (naps) and their
 // average from the gauge's charge, drawn as a purple band at that level.
-// Under the use, the charge over the last 24 hours (backend: level).
 // The full chart and the CSV are on LuCI: 状态 -> 功率监测.
 const $ = (id) => document.getElementById(id);
 let st = null, loadError = null;
@@ -56,76 +62,113 @@ function minutes(m) {
 	return Math.floor(m / 60) + e5.t({ zh: ' 小时 ', en: ' h ' }) + (m % 60) + e5.t({ zh: ' 分', en: ' min' });
 }
 
-// the use, red, on its own scale; plugged-in stretches as a green band, the
-// sleeps as a purple one with their level (when known) as a line
-function drawChart() {
-	const c = $('chart'), r = st?.recent ?? [], naps = st?.naps ?? [];
-	const W = c.clientWidth || 300, H = 70, dpr = window.devicePixelRatio || 1;
-	c.width = W * dpr; c.height = H * dpr;
+const SPANS = [[1800, { zh: '30 分钟', en: '30 min' }], [6 * 3600, { zh: '6 小时', en: '6 h' }], [24 * 3600, { zh: '24 小时', en: '24 h' }]];
+let span = 1800;
+try { span = +localStorage.getItem('powermon.span') || 1800; } catch (e) {}
+if (!SPANS.some(([s]) => s == span)) span = 1800;
+
+// a chart's canvas, sized, and its plot box: the left margin for the value
+// labels, the bottom one for the times -- the same in both charts, so their
+// times line up
+const AX = { L: 40, R: 4, T: 5, B: 16, H: 100 };
+function frame(id) {
+	const c = $(id), W = c.clientWidth || 300, dpr = window.devicePixelRatio || 1;
+	c.width = W * dpr; c.height = AX.H * dpr;
 	const g = c.getContext('2d');
 	g.setTransform(dpr, 0, 0, dpr, 0, 0);
-	g.clearRect(0, 0, W, H);
-	if (r.length < 2 && !naps.length) { $('chart-note').textContent = e5.t({ zh: '最近 30 分钟：数据不够', en: 'Last 30 min: not enough data' }); return; }
-	const t0 = Math.min(r[0][0], ...naps.map((z) => z[0])), t1 = r[r.length - 1][0];
-	const used = r.filter((p) => !p[2]).map((p) => p[1]).sort((a, b) => a - b);
-	const top = Math.max(100, (used.length ? used[Math.floor(used.length * 0.98)] : 0) * 1.1);
-	const X = (t) => (t - t0) / Math.max(1, t1 - t0) * (W - 2) + 1;
-	const Y = (v) => H - 2 - Math.max(0, Math.min(top, v)) / top * (H - 4);
-	// (one rectangle per plugged-in run: no seams between samples)
-	g.fillStyle = 'rgba(79,209,139,.18)';
-	let run = null;
-	for (let i = 0; i <= r.length; i++) {
-		const on = i < r.length && r[i][2] && (run == null || r[i][0] - r[i - 1][0] <= 120);
-		if (on) { if (run == null) run = r[i][0]; continue; }
-		if (run != null) { g.fillRect(Math.round(X(run)), 0, Math.max(1, Math.round(X(r[i - 1][0]) - X(run))), H); run = null; }
-		if (i < r.length && r[i][2]) run = r[i][0];
-	}
-	for (const [a, b, mw] of naps) {
-		g.fillStyle = 'rgba(150,110,230,.22)';
-		g.fillRect(Math.round(X(a)), 0, Math.max(1, Math.round(X(b) - X(a))), H);
-		if (mw == null) continue;
-		g.lineWidth = 1.5; g.strokeStyle = '#a98cf0';
-		g.beginPath(); g.moveTo(X(a), Y(mw)); g.lineTo(X(b), Y(mw)); g.stroke();
-	}
-	g.lineWidth = 1.5; g.strokeStyle = '#f0625a';
-	for (let i = 1; i < r.length; i++) {
-		if (r[i][0] - r[i - 1][0] > 120 || r[i][2] || r[i - 1][2]) continue;
-		g.beginPath(); g.moveTo(X(r[i - 1][0]), Y(r[i - 1][1])); g.lineTo(X(r[i][0]), Y(r[i][1])); g.stroke();
-	}
-	$('chart-note').textContent = used.length
-		? e5.t({ zh: `最近 30 分钟耗电，顶部 ${Math.round(top)} mW（绿色底为插电${naps.length ? '，紫色为深度休眠' : ''}）`,
-			en: `Last 30 min use, top ${Math.round(top)} mW (green: plugged in${naps.length ? ', purple: deep sleep' : ''})` })
-		: e5.t({ zh: '最近 30 分钟一直插着电（绿色底），没有耗电数据', en: 'Plugged in for the last 30 min (green): no use measured' });
+	g.clearRect(0, 0, W, AX.H);
+	g.font = '10px "Noto Sans CJK SC", "DejaVu Sans", sans-serif';
+	return { g, W, x0: AX.L, x1: W - AX.R, y0: AX.T, y1: AX.H - AX.B };
 }
 
-// the charge (%), on a scale of at least 10 points; plugged in as a green band
-function drawLevel() {
-	const c = $('level'), r = st?.level ?? [];
-	const W = c.clientWidth || 300, H = 70, dpr = window.devicePixelRatio || 1;
-	c.width = W * dpr; c.height = H * dpr;
-	const g = c.getContext('2d');
-	g.setTransform(dpr, 0, 0, dpr, 0, 0);
-	g.clearRect(0, 0, W, H);
-	if (r.length < 2) { $('level-note').textContent = e5.t({ zh: '电量：数据不够', en: 'Charge: not enough data' }); return; }
-	const t0 = r[0][0], t1 = r[r.length - 1][0];
-	const v = r.map((p) => p[1]);
-	let lo = Math.min(...v), hi = Math.max(...v);
-	const pad = Math.max(0, 10 - (hi - lo)) / 2;
-	lo = Math.max(0, Math.floor(lo - pad)); hi = Math.min(100, Math.ceil(hi + pad));
-	if (hi - lo < 10) { if (lo == 0) hi = 10; else lo = 90; }
-	const X = (t) => (t - t0) / Math.max(1, t1 - t0) * (W - 2) + 1;
-	const Y = (p) => H - 2 - (p - lo) / (hi - lo) * (H - 4);
+// the plugged-in (green) and asleep (purple) bands, value gridlines with
+// labels, the time axis: what both charts have
+function axes(f, c, X, Y, ticks, label) {
+	const { g, x0, x1, y0, y1 } = f, gap = Math.max(150, c.width * 2.5);
 	g.fillStyle = 'rgba(79,209,139,.18)';
-	for (let i = 0; i + 1 < r.length; i++)
-		if (r[i][2]) g.fillRect(X(r[i][0]), 0, Math.max(1, X(r[i + 1][0]) - X(r[i][0])), H);
-	g.lineWidth = 1.5; g.strokeStyle = '#5aa9f0';
-	g.beginPath();
-	r.forEach((p, i) => { if (i) g.lineTo(X(p[0]), Y(p[1])); else g.moveTo(X(p[0]), Y(p[1])); });
-	g.stroke();
-	const span = minutes(Math.round((t1 - t0) / 60));
-	$('level-note').textContent = e5.t({
-		zh: `最近 ${span}电量 ${v[0]}% → ${v[v.length - 1]}%，纵轴 ${lo}–${hi}%（绿色底为插电）`,
-		en: `Charge over ${span}: ${v[0]}% → ${v[v.length - 1]}%, scale ${lo}–${hi}% (green: plugged in)` });
+	c.pts.forEach((p, i) => {
+		if (!p[2]) return;
+		const a = i && p[0] - c.pts[i - 1][0] <= gap ? c.pts[i - 1][0] : p[0] - c.width;
+		g.fillRect(X(Math.max(c.from, a)), y0, Math.max(1, X(p[0]) - X(Math.max(c.from, a))), y1 - y0);
+	});
+	g.fillStyle = 'rgba(150,110,230,.25)';
+	for (const [a, b] of c.naps) g.fillRect(X(a), y0, Math.max(1, X(b) - X(a)), y1 - y0);
+	g.strokeStyle = 'rgba(139,149,165,.25)'; g.fillStyle = '#8b95a5'; g.lineWidth = 1;
+	g.textAlign = 'right'; g.textBaseline = 'middle';
+	for (const v of ticks) {
+		const y = Math.round(Y(v)) + .5;
+		g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+		g.fillText(label(v), x0 - 4, Math.min(y1 - 4, Math.max(y0 + 4, y)));
+	}
+	const sp = c.to - c.from, fit = Math.max(2, Math.floor((x1 - x0) / 48));
+	const step = [300, 600, 900, 1800, 3600, 7200, 10800, 21600].find((v) => sp / v <= fit) || 43200;
+	const p2 = (n) => String(n).padStart(2, '0');
+	g.textAlign = 'center'; g.textBaseline = 'top';
+	for (let t = Math.ceil(c.from / step) * step; t <= c.to; t += step) {
+		const x = Math.round(X(t)) + .5, d = new Date(t * 1000);
+		g.beginPath(); g.moveTo(x, y0); g.lineTo(x, y1); g.stroke();
+		const s = p2(d.getHours()) + ':' + p2(d.getMinutes()), w = g.measureText(s).width / 2;
+		g.fillText(s, Math.min(x1 - w, Math.max(x0 + w, x)), y1 + 3);
+	}
+	g.strokeStyle = 'rgba(139,149,165,.6)';
+	g.beginPath(); g.moveTo(x0 + .5, y0); g.lineTo(x0 + .5, y1 + .5); g.lineTo(x1, y1 + .5); g.stroke();
+}
+
+// the use (red) over the range, and the sleeps' (purple, when known); the
+// charge (blue) under it, on the same times
+function drawCharts() {
+	const c = st?.charts?.[span];
+	document.querySelectorAll('#spans button').forEach((b) => b.classList.toggle('on', +b.dataset.span == span));
+	const pf = frame('chart'), lf = frame('level');
+	if (!c || c.to - c.from < 60 || c.pts.length + c.naps.length < 2) {
+		$('chart-note').textContent = e5.t({ zh: '数据不够：采样开始后过一会儿再看', en: 'Not enough data yet' });
+		$('level-note').textContent = '';
+		return;
+	}
+	const X = (t) => pf.x0 + (t - c.from) / Math.max(1, c.to - c.from) * (pf.x1 - pf.x0);
+	const gap = Math.max(150, c.width * 2.5);
+
+	// the use: its scale from the unplugged steps and the sleeps
+	const used = c.pts.filter((p) => p[1] != null).map((p) => p[1])
+		.concat(c.naps.filter((z) => z[2] != null).map((z) => z[2])).sort((a, b) => a - b);
+	let top = Math.max(100, (used.length ? used[Math.floor(used.length * 0.98)] : 0) * 1.1);
+	const step = [50, 100, 200, 250, 500, 1000, 2000].find((v) => top / v <= 3) || 5000;
+	top = Math.ceil(top / step) * step;
+	const Yp = (v) => pf.y1 - Math.max(0, Math.min(top, v)) / top * (pf.y1 - pf.y0);
+	const ticks = [];
+	for (let v = 0; v <= top; v += step) ticks.push(v);
+	axes(pf, c, X, Yp, ticks, (v) => v >= 1000 ? (v / 1000) + ' W' : v + (v ? ' mW' : ''));
+	const g = pf.g;
+	g.lineWidth = 1.5; g.strokeStyle = '#a98cf0';
+	for (const [a, b, mw] of c.naps) {
+		if (mw == null) continue;
+		g.beginPath(); g.moveTo(X(a), Yp(mw)); g.lineTo(X(b), Yp(mw)); g.stroke();
+	}
+	g.strokeStyle = '#f0625a';
+	for (let i = 1; i < c.pts.length; i++) {
+		const p = c.pts[i - 1], q = c.pts[i];
+		if (p[1] == null || q[1] == null || p[2] || q[2] || q[0] - p[0] > gap) continue;
+		g.beginPath(); g.moveTo(X(p[0]), Yp(p[1])); g.lineTo(X(q[0]), Yp(q[1])); g.stroke();
+	}
+	$('chart-note').innerHTML = e5.t({
+		zh: '<span style="color:#f0625a">━</span> 耗电　<span style="color:#a98cf0">━</span> 休眠估算　绿底 插电　紫底 深度休眠',
+		en: '<span style="color:#f0625a">━</span> use　<span style="color:#a98cf0">━</span> asleep (est.)　green: plugged in　purple: deep sleep' });
+
+	// the charge: a scale of at least 10 points, on multiples of 5
+	const v = c.pts.filter((p) => p[3] != null);
+	if (!v.length) { $('level-note').textContent = ''; return; }
+	let lo = Math.floor(Math.min(...v.map((p) => p[3])) / 5) * 5, hi = Math.ceil(Math.max(...v.map((p) => p[3])) / 5) * 5;
+	if (hi - lo < 10) hi = lo + 10;
+	if (hi > 100) { lo -= hi - 100; hi = 100; }
+	const Yl = (p) => lf.y1 - (p - lo) / (hi - lo) * (lf.y1 - lf.y0);
+	axes(lf, c, X, Yl, (hi - lo) % 10 == 0 ? [lo, (lo + hi) / 2, hi] : [lo, hi], (p) => p + '%');
+	lf.g.lineWidth = 1.5; lf.g.strokeStyle = '#5aa9f0';
+	lf.g.beginPath();
+	v.forEach((p, i) => { if (i) lf.g.lineTo(X(p[0]), Yl(p[3])); else lf.g.moveTo(X(p[0]), Yl(p[3])); });
+	lf.g.stroke();
+	$('level-note').innerHTML = e5.t({
+		zh: `<span style="color:#5aa9f0">━</span> 电量 ${v[0][3]}% → ${v[v.length - 1][3]}%`,
+		en: `<span style="color:#5aa9f0">━</span> charge ${v[0][3]}% → ${v[v.length - 1][3]}%` });
 }
 
 function drawNow(x) {
@@ -190,8 +233,7 @@ function draw() {
 		(rows.length ? rows.join('') : `<div class="sub">${e5.t({ zh: '没有未插电的数据：拔掉 USB 线才能测出耗电。', en: 'No unplugged data: unplug USB to measure.' })}</div>`);
 	$('note').textContent = e5.t({ zh: '完整曲线和导出：电脑浏览器打开 LuCI → 状态 → 功率监测。', en: 'Full chart and CSV: LuCI -> Status -> Power monitor.' }) +
 		(st.service ? '' : e5.t({ zh: '（后台采样未运行）', en: ' (the sampler is not running)' }));
-	drawChart();
-	drawLevel();
+	drawCharts();
 }
 
 async function load() {
@@ -200,6 +242,15 @@ async function load() {
 	draw();
 }
 
+$('chart-title').textContent = e5.t({ zh: '耗电与电量', en: 'Use and charge' });
+$('spans').innerHTML = SPANS.map(([s, l]) => `<button data-span="${s}">${esc(e5.t(l))}</button>`).join('');
+$('spans').addEventListener('click', (ev) => {
+	const s = +ev.target.dataset?.span;
+	if (!s) return;
+	span = s;
+	try { localStorage.setItem('powermon.span', String(s)); } catch (e) {}
+	drawCharts();
+});
 draw();
 load();
 setInterval(load, 10000);

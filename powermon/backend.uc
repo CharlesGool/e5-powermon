@@ -5,8 +5,9 @@
 // -- an image update brings neither; the notification poll puts them back --
 // and serves the app's page on the screen.
 //
-//   GET  /status          the newest sample, the last 30 min, the charge over
-//                         24 h, averages by state, the charging session
+//   GET  /status          the newest sample, the use and the charge over the
+//                         last 30 min, 6 h and 24 h, averages by state, the
+//                         charging session
 //   GET  /notifications   (none: only the install check, once a minute)
 //
 // Plugged in, the gauge reads what goes into the battery, not the device's
@@ -35,8 +36,9 @@ const HOLD_MA = 15;
 const SLEEP_OWN = 1800;
 // the sleeps' average is given from this much sleep (s) on
 const SLEEP_MIN = 600;
-// the charge chart's points (about the screen's width)
-const LEVEL_POINTS = 150;
+// the charts' ranges (s) and points per range (about the screen's width)
+const CHART_SPANS = [ 1800, 6 * 3600, 24 * 3600 ];
+const CHART_POINTS = 240;
 // the app's file -> where it goes
 const FILES = [
 	[ 'powermon.init', INIT, true ],
@@ -148,26 +150,37 @@ return function(ctx) {
 		return { list: out, sec, msec, avg };
 	}
 
-	// the charge over `day` in at most LEVEL_POINTS steps: [ t, %, plugged ]
-	// -- a step's last sample, plugged if any of its samples was.  (The %
-	// the status bar has, not the gauge's 0.1 %: v1.1's rows have only that,
-	// and the two differ by a % or two.)
-	function level(day) {
-		let n = length(day), out = [];
-		if (!n) return out;
-		let t0 = day[0].t, step = max(1, (day[n - 1].t - t0) / LEVEL_POINTS), cur = null, k = -1;
+	// the charts of the last `span` s: the time from..to (from the first
+	// sample on), the use and the charge in at most CHART_POINTS steps --
+	// [ t, mw, plugged, % ]: a step's newest time and %, the mean use of its
+	// unplugged samples (null with none), plugged if any was -- and the sleeps,
+	// cut to it: [ from, to, mw ].  (The % the status bar has, not the gauge's
+	// 0.1 %: v1.1's rows have only that, and the two differ by a % or two.)
+	function chart(day, sl, now, span) {
+		let start = now.t - span, from = null, pts = [], cur = null, k = -1, sum = 0, cnt = 0;
+		let width = span / (CHART_POINTS * 1.0);
 		for (let x in day) {
-			let pct = x.battery;
-			if (pct == null) continue;
-			let b = int((x.t - t0) / step);
+			if (x.t <= start) continue;
+			if (from == null) from = x.t;
+			let b = int((x.t - start) / width);
 			if (b != k) {
-				k = b;
-				push(out, cur = [ x.t, pct, x.plugged ]);
-				continue;
+				if (cur) cur[1] = cnt ? int(sum / cnt) : null;
+				k = b; sum = 0; cnt = 0;
+				push(pts, cur = [ x.t, null, false, null ]);
 			}
-			cur[0] = x.t; cur[1] = pct; cur[2] = cur[2] || x.plugged;
+			cur[0] = x.t;
+			if (x.plugged) cur[2] = true;
+			else { sum += x.mw; cnt++; }
+			if (x.battery != null) cur[3] = x.battery;
 		}
-		return out;
+		if (cur) cur[1] = cnt ? int(sum / cnt) : null;
+		let naps = [];
+		for (let z in sl.list)
+			if (z.to > start) {
+				from = min(from ?? z.from, max(z.from, start));
+				push(naps, [ max(z.from, start), z.to, z.mw ]);
+			}
+		return { from: from ?? now.t, to: now.t, width: int(width), pts, naps };
 	}
 
 	// the newest run of plugged samples (gaps up to 3 min) in `day`: the one
@@ -214,7 +227,7 @@ return function(ctx) {
 			// (plugged: what goes into the battery, + while charging)
 			now.charge_mw = now.plugged ? -now.mw : null;
 		}
-		let groups = {}, recent = [], sum5 = 0, n5 = 0;
+		let groups = {}, sum5 = 0, n5 = 0;
 		let plugged_now = now?.plugged ?? false;
 		// (a sample before a sleep: the gap is the sleep's, not its)
 		let sl = sleeps(day), before = {};
@@ -222,7 +235,6 @@ return function(ctx) {
 		for (let i = 0; i < n; i++) {
 			let x = day[i];
 			let w = before[i] ? 0 : (i + 1 < n) ? min(day[i + 1].t - x.t, 60) : 10;
-			if (now && x.t > now.t - 1800) push(recent, [ x.t, x.mw, x.plugged ]);
 			// the 5-minute average of what the newest sample is: the use, or the charging
 			if (now && x.t > now.t - 300 && x.plugged == plugged_now) { sum5 += plugged_now ? -x.mw : x.mw; n5++; }
 			if (x.plugged || !w) continue;
@@ -238,11 +250,10 @@ return function(ctx) {
 		if (sl.sec)
 			push(avg, { sleep: true, screen: false, hotspot: false, saver: true, minutes: int(sl.sec / 60),
 				mw: sl.avg?.mw, ma: sl.avg?.ma });
-		// the sleeps of the last 30 min, cut to it: [ from, to, mw ]
-		let naps = [];
-		for (let z in sl.list)
-			if (now && z.to > now.t - 1800) push(naps, [ max(z.from, now.t - 1800), z.to, z.mw ]);
-		return { now, avg5: n5 ? int(sum5 / n5) : null, recent, naps, level: level(day), avg, session: session(day, now),
+		let charts = {};
+		if (now)
+			for (let span in CHART_SPANS) charts[span] = chart(day, sl, now, span);
+		return { now, avg5: n5 ? int(sum5 / n5) : null, charts, avg, session: session(day, now),
 			capacity_mah: capacity_mah(), samples: n, service: running() };
 	}
 
