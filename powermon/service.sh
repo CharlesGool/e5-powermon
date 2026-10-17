@@ -23,8 +23,12 @@
 #   fgu         the fuel gauge's own charge, 0.1 % (sc27xx-fgu/capacity: its
 #               coulomb counter, which goes on counting in suspend)
 #   sleep       s the system was suspended since the previous sample, 0 awake
-#   held        1 plugged in with the charger in HiZ (e5-charge's limit or block,
-#               USB 关闭（不充电）): it draws nothing from USB, so this is the use
+#   held        1 plugged in, and not charging: the charger in HiZ (e5-charge's limit
+#               or block, USB 关闭（不充电）), or charging stopped otherwise (full, the
+#               charger manager) with the battery giving -- this charger has no
+#               power path, so not charging means the battery runs the device and
+#               this is the use.  (Charging, with the battery still giving: the USB
+#               port gives too little, e.g. a computer's 500 mA; that stays plugged)
 #
 # Suspended (热点省电's deep sleep), nothing runs and no samples are taken:
 # the sample after a wake has `sleep` > 0, and the use over the gap is what
@@ -147,7 +151,12 @@ while :; do
 	get v /sys/class/power_supply/ac/online; [ "$v" = 1 ] && plugged=1
 	case "$status" in Charging|Full) plugged=1 ;; esac
 	held=0
-	if [ "$plugged" = 1 ]; then get v "$HIZ"; [ "$v" = 1 ] && { plugged=0; held=1; }; fi
+	if [ "$plugged" = 1 ]; then
+		get v "$HIZ"
+		if [ "$v" = 1 ] || { [ "$status" != Charging ] && [ "$ua" -lt -15000 ]; }; then
+			plugged=0; held=1
+		fi
+	fi
 
 	screen=0
 	if [ -n "$BACKLIGHT" ]; then get v "$BACKLIGHT"; [ "${v:-0}" -gt 0 ] 2>/dev/null && screen=1; fi

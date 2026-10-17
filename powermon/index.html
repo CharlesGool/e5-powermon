@@ -182,12 +182,12 @@ function drawNow(x) {
 		line = e5.t({ zh: '插电中：电池几乎没有电流进出，由充电器供电', en: 'Plugged in: the charger runs the device' });
 	} else if (x.kind == 'drain') {
 		big = `<span class="big warn">${x.mw} mW</span>`;
-		line = `<span class="warn">${e5.t({ zh: '插着电，电池仍在放电：充电器供电不够', en: 'Plugged in, and the battery still drains: the charger is short' })}</span>`;
+		line = `<span class="warn">${e5.t({ zh: '正在充电，但电池仍在放电：USB 口供电不足（如电脑的 500 mA 口）', en: 'Charging, yet the battery still drains: the USB port gives too little (a computer\'s 500 mA)' })}</span>`;
 	} else {
 		big = `<span class="big">${x.mw} mW</span>`;
 		line = esc(stateName(x));
 		// (plugged in, the charger held off: the battery runs the device, this is the use)
-		if (x.held) line += ' · ' + e5.t({ zh: '插着电，充电已停（充电保护），由电池供电', en: 'plugged in, charging held off: on battery' });
+		if (x.held) line += ' · ' + e5.t({ zh: '插着电，未在充电（充电保护或已充满），由电池供电', en: 'plugged in, not charging (limit or full): on battery' });
 	}
 	// (plugged, avg5 is the charging: below 0, the battery gave on average)
 	const avg = st.avg5 == null ? '' : !x.plugged

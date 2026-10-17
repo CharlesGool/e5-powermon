@@ -1,7 +1,7 @@
 {
 	"id": "powermon",
 	"api_version": 2,
-	"version": "1.3",
+	"version": "1.4",
 	"name": { "zh": "功率监测", "en": "Power Monitor" },
 	"description": { "zh": "整机耗电曲线和充电记录，按状态统计，可导出", "en": "Power draw and charging over time, by state, exportable" },
 	"entry": "index.html",

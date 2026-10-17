@@ -4,7 +4,7 @@
 
 *Power draw and charging over time, by state, exportable*
 
-容悦 E5（OpenWrt）信息屏应用。当前版本 **v1.3**，应用 ID `powermon`。
+容悦 E5（OpenWrt）信息屏应用。当前版本 **v1.4**，应用 ID `powermon`。
 
 ## 截图
 
@@ -54,7 +54,8 @@ CSV 增加两列 `fgu`（电量计电量，0.1%）和 `sleep`（距上个样本�
 
 ## 版本
 
-- [v1.3](releases/powermon-v1.3.tar.gz)（当前）：插着电但充电被停掉（充电保护、USB 关闭（不充电），充电芯片 HiZ）时按电池供电计入耗电，并注明“充电已停”；采样数据每 10 分钟和服务停止时追加到 /etc/e5/powermon（重启和刷机升级后保留，24 小时曲线不再从零开始）
+- [v1.4](releases/powermon-v1.4.tar.gz)（当前）：插着电但没在充电（充电保护、已充满）时一律按电池供电计入耗电，不再误报“充电器供电不够”；只有正在充电而电池仍放电时才提示 USB 口供电不足
+- [v1.3](releases/powermon-v1.3.tar.gz)：插着电但充电被停掉（充电保护、USB 关闭（不充电），充电芯片 HiZ）时按电池供电计入耗电，并注明“充电已停”；采样数据每 10 分钟和服务停止时追加到 /etc/e5/powermon（重启和刷机升级后保留，24 小时曲线不再从零开始）
 - [v1.2](releases/powermon-v1.2.tar.gz)：统计深度休眠期间的耗电；信息屏页面的耗电图下增加电量图，两图共用时间轴（30 分钟 / 6 小时 / 24 小时可切换），带坐标轴，标出插电和深度休眠时段；修正「预计充满」恒为 0 分钟
 - [v1.1](releases/powermon-v1.1.tar.gz)
 - [v1.0](releases/powermon-v1.0.tar.gz)
