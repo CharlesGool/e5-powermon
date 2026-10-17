@@ -99,7 +99,7 @@ return function(ctx) {
 			unshift(out, { t, ma: +f[1], mv: +f[2], mw: +f[3], plugged: f[4] == '1',
 				screen: f[5] == '1', hotspot: f[6] == '1', saver: f[7] == '1',
 				battery: f[8] == '' ? null : +f[8],
-				fgu: (f[9] ?? '') == '' ? null : +f[9], sleep: +(f[10] ?? 0) });
+				fgu: (f[9] ?? '') == '' ? null : +f[9], sleep: +(f[10] ?? 0), held: f[11] == '1' });
 		}
 		return out;
 	}

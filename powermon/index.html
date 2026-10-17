@@ -186,6 +186,8 @@ function drawNow(x) {
 	} else {
 		big = `<span class="big">${x.mw} mW</span>`;
 		line = esc(stateName(x));
+		// (plugged in, the charger held off: the battery runs the device, this is the use)
+		if (x.held) line += ' · ' + e5.t({ zh: '插着电，充电已停（充电保护），由电池供电', en: 'plugged in, charging held off: on battery' });
 	}
 	// (plugged, avg5 is the charging: below 0, the battery gave on average)
 	const avg = st.avg5 == null ? '' : !x.plugged

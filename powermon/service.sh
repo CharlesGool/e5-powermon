@@ -2,9 +2,11 @@
 # 功率监测 (Power Monitor) -- the sampler of the powermon info screen app.
 #
 # Every INTERVAL s (e5-plugin-powermon.settings.interval, 10 by default) one
-# line goes to CSV, in RAM (/tmp: nothing is written to flash):
+# line goes to CSV, in RAM (/tmp), and every SAVE_EVERY lines (10 min) the new
+# ones are appended to KEEP (/etc/e5/powermon/samples.csv: a reboot and an image
+# update -- which keeps /etc/e5 -- start from it), and when the service stops:
 #
-#   time,current_ma,voltage_mv,power_mw,plugged,screen,hotspot,saver,battery,fgu,sleep
+#   time,current_ma,voltage_mv,power_mw,plugged,screen,hotspot,saver,battery,fgu,sleep,held
 #
 #   time        Unix time, s
 #   current_ma  the fuel gauge's current: + into the battery, - out of it
@@ -12,7 +14,8 @@
 #   voltage_mv  the battery's voltage (voltage_now in uV)
 #   power_mw    what the device draws from the battery: -current x voltage
 #   plugged     1 with USB/AC power: the gauge then sees charging minus use,
-#               not the use itself -- such samples are kept but not counted
+#               not the use itself -- such samples are kept but not counted;
+#               0 with the charger held off (held): the battery runs the device
 #   screen      1 with the backlight on
 #   hotspot     1 with the hotspot's interface (wlan0) up
 #   saver       1 while 热点省电 (hotspotdata) has the radio off or the CPU held
@@ -20,6 +23,8 @@
 #   fgu         the fuel gauge's own charge, 0.1 % (sc27xx-fgu/capacity: its
 #               coulomb counter, which goes on counting in suspend)
 #   sleep       s the system was suspended since the previous sample, 0 awake
+#   held        1 plugged in with the charger in HiZ (e5-charge's limit or block,
+#               USB 关闭（不充电）): it draws nothing from USB, so this is the use
 #
 # Suspended (热点省电's deep sleep), nothing runs and no samples are taken:
 # the sample after a wake has `sleep` > 0, and the use over the gap is what
@@ -41,6 +46,10 @@ CFG=e5-plugin-powermon
 INIT=/etc/init.d/powermon
 OUT=/tmp/powermon
 CSV=$OUT/samples.csv
+KEEP=/etc/e5/powermon
+KEEP_CSV=$KEEP/samples.csv
+SAVE_EVERY=60
+HIZ=/sys/class/power_supply/aw322xx_charger/high_impedance_enable
 BAT=/sys/class/power_supply/battery
 FGU=/sys/class/power_supply/sc27xx-fgu
 MAX_LINES=26000
@@ -63,7 +72,7 @@ remove_self() {
 	log "app removed: sampler, LuCI page and data removed"
 	rm -f $LUCI_FILES
 	rmdir /www/luci-static/resources/view/powermon 2>/dev/null
-	rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache "$OUT"
+	rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache "$OUT" "$KEEP"
 	/etc/init.d/rpcd reload >/dev/null 2>&1
 	"$INIT" disable 2>/dev/null
 	rm -f "$INIT"
@@ -87,8 +96,23 @@ for b in /sys/class/backlight/*; do
 	[ -f "$b/brightness" ] && { BACKLIGHT=$b/brightness; break; }
 done
 
+# the kept copy: the new lines appended (pending), all of it after a trim
+save() {
+	[ "$pending" -gt 0 ] || return 0
+	mkdir -p "$KEEP" || return 0
+	if [ -n "$rewrite" ] || [ ! -s "$KEEP_CSV" ]; then
+		cp "$CSV" "$KEEP_CSV.new" && mv -f "$KEEP_CSV.new" "$KEEP_CSV"
+	else
+		tail -n "$pending" "$CSV" >> "$KEEP_CSV"
+	fi
+	pending=0; rewrite=
+}
+trap 'save; exit 0' TERM INT
+
 mkdir -p "$OUT"
-lines=0
+# (after a reboot: the samples from before it)
+[ -s "$CSV" ] || { [ -s "$KEEP_CSV" ] && cp "$KEEP_CSV" "$CSV"; }
+lines=0; pending=0; rewrite=
 [ -f "$CSV" ] && lines=$(wc -l < "$CSV")
 INTERVAL=$(interval)
 clock_sync
@@ -122,6 +146,8 @@ while :; do
 	get v /sys/class/power_supply/usb/online; [ "$v" = 1 ] && plugged=1
 	get v /sys/class/power_supply/ac/online; [ "$v" = 1 ] && plugged=1
 	case "$status" in Charging|Full) plugged=1 ;; esac
+	held=0
+	if [ "$plugged" = 1 ]; then get v "$HIZ"; [ "$v" = 1 ] && { plugged=0; held=1; }; fi
 
 	screen=0
 	if [ -n "$BACKLIGHT" ]; then get v "$BACKLIGHT"; [ "${v:-0}" -gt 0 ] 2>/dev/null && screen=1; fi
@@ -135,12 +161,13 @@ while :; do
 	mv=$((uv / 1000))
 	# (uA x mV / 10^6 = mW; up to ~10^10, well inside the shell's 64 bits)
 	mw=$(( -ua * mv / 1000000 ))
-	echo "$((boot + up)),$ma,$mv,$mw,$plugged,$screen,$hotspot,$saver,${cap:-},$fgu,$sl" >> "$CSV"
-	lines=$((lines + 1))
+	echo "$((boot + up)),$ma,$mv,$mw,$plugged,$screen,$hotspot,$saver,${cap:-},$fgu,$sl,$held" >> "$CSV"
+	lines=$((lines + 1)); pending=$((pending + 1))
 	if [ "$lines" -gt "$MAX_LINES" ]; then
 		tail -n $((MAX_LINES * 3 / 4)) "$CSV" > "$CSV.new" && mv -f "$CSV.new" "$CSV"
-		lines=$((MAX_LINES * 3 / 4))
+		lines=$((MAX_LINES * 3 / 4)); rewrite=1
 	fi
+	[ "$pending" -lt "$SAVE_EVERY" ] || save
 
 	# (the interval setting, once a minute: uci is a process)
 	cfg_check=$((cfg_check + INTERVAL))
@@ -149,5 +176,7 @@ while :; do
 		INTERVAL=$(interval)
 	fi
 	prev_interval=$INTERVAL
-	sleep "$INTERVAL"
+	# (in the background: a stop's TERM is handled at once, and the data kept)
+	sleep "$INTERVAL" &
+	wait $!
 done
